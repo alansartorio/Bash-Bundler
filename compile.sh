@@ -1,35 +1,95 @@
 old_IFS=$IFS         
 IFS=$'\n'
 info() {
-    echo "$1" 1>&2
+    >&2 echo "$1"
 }
+outputWrite() {
+    cat >&"$1"
+}
+noOutput() {
+    :
+}
+
+codeFile=/dev/null
+dependencyFile=/dev/null
+inputFile=
+
+while [ $# -ge 1 ]
+do
+    opt="$1"
+    case "$opt" in
+        "-o" | "-d" | "-i")
+            shift
+            if [ $# -le 0 ]; then
+                info "Missing file after parameter \"$opt\"."
+                exit 1
+            fi
+            value="$1"
+            case "$opt" in
+                "-o")
+                    codeFile="$value"
+                ;;
+                "-d")
+                    dependencyFile="$value"
+                ;;
+                "-i")
+                    inputFile="$value"
+                ;;
+            esac
+        ;;
+        *)
+            info "Unrecognized parameter \"$opt\"."
+            exit 1
+    esac
+    shift
+done
+
+if [ -z "$inputFile" ]
+then
+    info "You must specify one input file."
+    exit 1
+fi
+
+exec 3>"$codeFile"
+exec 4>"$dependencyFile"
+
+alias codeOutputWrite="outputWrite 3"
+alias dependencyOutputWrite="outputWrite 4"
+
 SCRIPT=`realpath $0`
 # info "$SCRIPT"
-fileName=$(basename "$1")
-cd "$(dirname "$1")"
-info "Started compiling \"$fileName\"."
+inputPath="$(dirname "$inputFile")"
+info "Started compiling \"$inputFile\"."
 
-for line in $(cat "$fileName")
+for line in $(cat "$inputFile")
 do
     if [[ "$line" == "%INCLUDE "* ]]
     then
-        file=${line#%INCLUDE }
+        file=$(realpath --relative-to "$PWD" -s "$inputPath/${line#%INCLUDE }")
+        
         info "Including from \"$file\"..."
-        echo "# BEGIN INCLUDE FROM $file"
-        "$SCRIPT" "$file"
-        echo "# END INCLUDE FROM $file"
+        codeOutputWrite <<< "# BEGIN INCLUDE FROM \"$file\""
+        dependencyOutputWrite <<< "\"$file\""
+        
+        "$SCRIPT" -i "$file" -o >(codeOutputWrite) -d >(dependencyOutputWrite)
+
+        codeOutputWrite <<< "# END INCLUDE FROM $file"
     elif [[ "$line" == *"=%READCONTENT "* ]]
     then
         var=${line%%=%READCONTENT *}
-        file=${line#*=%READCONTENT }
+        file=$(realpath --relative-to "$PWD" -s "$inputPath/${line#*=%READCONTENT }")
         info "Readcontent from \"$file\" into variable \"$var\"..."
-        data=$("$SCRIPT" "$file")
-        printf '%s=%q\n' "$var" "$data"
+        data=$("$SCRIPT" -i "$file" -o >(cat) -d >(dependencyOutputWrite))
+        codeOutputWrite <<< "$(printf '%s=%q\n' "$var" "$data")"
+        dependencyOutputWrite <<< "\"$file\""
     else
-        echo "$line"
+        codeOutputWrite <<< "$line"
     fi
 done
 
-info "Finished compiling \"$fileName\"."
+exec 3>&-
+exec 4>&-
+
+info "Finished compiling \"$inputFile\"."
 
 IFS=$old_IFS
